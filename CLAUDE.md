@@ -15,9 +15,15 @@ The main conversation plans, reviews (`git diff`), and talks to the user.
 - Never approve or answer on the user's behalf.
 
 ## Workflow (tools)
-1. `list_models` (filter e.g. `free`) / `set_default_model`; `model` on `run` overrides per job (`provider/model[#variant]`). `list_agents` shows opencode agents.
-2. `run` -> job id at once. `check` / `check_all(wait_seconds)` follow progress and show an `activity` feed. `tail -f ~/.opencode-navigator/logs/<job>.log` in a terminal watches a job live.
-3. `diff(job)`, then review with `git diff`. `send_message` steers or continues, `cancel` stops.
+1. Models: `list_models` (filter e.g. `free`), `set_default_model`, and `set_routing(task_type, model)` so `run(task_type: "explore" | "implement" | "hard" | ...)` picks a model; `review` is the reviewer's key. An explicit `model` always wins.
+2. `run` -> job id at once. Useful options: `worktree`, `allowed_paths` (edits elsewhere are denied), `max_cost` (USD cap, the job is stopped when exceeded), `verify: true`, `review: true`, `label`.
+3. `check` / `check_all(wait_seconds)` follow progress. Results are compact on purpose: `result` (short), `report` (files_changed / tests / open_issues / assumptions), `files`, `verify`, `review_job`. Full text and patches are in `result_file` / `patch_file`: read them only when something is unclear.
+4. `diff(job)` lists changed files with +/- counts; `diff(job, file)` shows one file's patch. `verify(job)` runs the project's test command; failures can go back to the job with `send_message`. `review(job, model?)` has another model review the diff (findings + VERDICT).
+5. Before merging: show the user the file list, report and verify/review outcome, then `worktree_finish(job, merge)` (refuses on failed verify, secret-looking strings, conflicts, dirty repo; `force` overrides after the user agrees).
+6. `usage` shows cost per model. `list_stale_worktrees` / `remove_worktrees` clean up leftovers. `tail -f ~/.opencode-navigator/logs/<job>.log` watches a job live. Jobs survive restarts (`~/.opencode-navigator/jobs.json`); macOS notifications fire when jobs finish or need you (`set_notifications`).
+
+## Project setup for verify
+Create `.opencode-navigator.json` in the repo root (see `.opencode-navigator.example.json`), e.g. `{"verify": "npm test"}`. It is read from the original repo when a job starts, never from the job's worktree.
 
 ## Parallel jobs
 - Use `worktree: true` for every job that writes while other jobs run. Each gets its own branch `oc/<job>` in `~/.opencode-navigator/worktrees/`.
@@ -33,4 +39,4 @@ The main conversation plans, reviews (`git diff`), and talks to the user.
 Free models may log prompts; keep secrets out of briefs. Jobs live only while the MCP server process runs.
 
 ## Testing
-`node test/client.mjs <tool> '<json>'` (single tool), `test/e2e.mjs` (approval round trip), `test/parallel.mjs` (two worktree jobs, merge), `test/interact.mjs` (questions and subagents), `test/dialog.mjs` (simulated native dialogs).
+`node test/client.mjs <tool> '<json>'` (single tool), `test/e2e.mjs` (approval round trip), `test/parallel.mjs` (two worktree jobs, merge), `test/interact.mjs` (questions and subagents), `test/dialog.mjs` (simulated native dialogs), `test/features.mjs` (routing, scope, verify, review, secrets, persistence), `test/saved.mjs` (saved permissions).

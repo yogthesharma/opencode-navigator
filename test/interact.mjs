@@ -17,7 +17,7 @@ for (let i = 0; i < 30; i++) {
   console.log("STATUS", job.status, "subagents:", JSON.stringify(job.subagents ?? []));
   for (const p of s.pending) {
     console.log("PENDING", JSON.stringify(p).slice(0, 600));
-    if (p.kind === "permission") await call("reply", { job: p.job, request_id: p.request_id, decision: "once" });
+    if (p.kind === "permission") await call("approve", { job: p.job, request_id: p.request_id, scope: "once", action: p.action, resources: p.resources });
     else {
       const answers = {};
       for (const f of p.fields) answers[f.key] = f.options?.length ? f.options[0].value : f.type === "boolean" ? true : "blue";

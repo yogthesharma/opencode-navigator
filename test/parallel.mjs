@@ -16,7 +16,7 @@ console.log("STARTED", a.job, a.worktree?.branch, "|", b.job, b.worktree?.branch
 for (let i = 0; i < 40; i++) {
   const s = await call("check_all", { wait_seconds: 20 });
   console.log("SUMMARY", JSON.stringify(s.summary), "pending:", s.pending.map((p) => `${p.label}:${p.kind}:${p.action ?? p.title}`).join(","));
-  for (const p of s.pending) if (p.kind === "permission") await call("reply", { job: p.job, request_id: p.request_id, decision: "once" });
+  for (const p of s.pending) if (p.kind === "permission") await call("approve", { job: p.job, request_id: p.request_id, scope: "once", action: p.action, resources: p.resources });
   if (s.summary.running === 0 && s.pending.length === 0) break;
 }
 for (const j of [a, b]) {

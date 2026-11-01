@@ -1,0 +1,4 @@
+{
+  "verify": "npm test",
+  "verify_timeout_s": 300
+}
