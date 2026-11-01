@@ -367,7 +367,9 @@ async function progress(extra, message) {
 
 // ---------- approvals: native dialog (MCP elicitation) or relay through Claude ----------
 const clientCanElicit = () => Boolean(mcp.server.getClientCapabilities()?.elicitation);
+let dialogsDeadUntil = 0; // set when the host auto-dismisses dialogs (e.g. background subagents)
 async function approvalMode() {
+  if (Date.now() < dialogsDeadUntil) return "relay";
   const want = (await readState()).approvalUi ?? process.env.OPENCODE_NAVIGATOR_APPROVALS ?? "elicit";
   return want === "elicit" && clientCanElicit() ? "elicit" : "relay";
 }
@@ -413,6 +415,7 @@ async function autoResolve() {
       inflight.add(key);
       try {
         if (p.kind === "permission") {
+          const askedAt = Date.now();
           const r = await mcp.server.elicitInput(
             {
               message: `opencode${p.from_subagent ? " subagent" : ""} wants to ${p.action}:\n${(p.resources ?? []).join("\n")}\n\n${who}`,
@@ -420,6 +423,10 @@ async function autoResolve() {
             },
             { timeout: 300000 },
           );
+          if (r.action !== "accept" && Date.now() - askedAt < 2000) {
+            dialogsDeadUntil = Date.now() + 30 * 60 * 1000; // answered in <2s without accepting: nobody saw it
+            await debugLog("dialogs look auto-dismissed by the host; using relay (Claude Code approval prompts) for 30 min");
+          }
           await debugLog(`elicit permission ${p.action} ${JSON.stringify(p.resources)} -> ${r.action} ${JSON.stringify(r.content ?? {})}`);
           // Only an explicit answer counts. A declined/cancelled/auto-dismissed dialog is NOT a user decision:
           // hand the request to Claude instead (approve() shows Claude Code's own prompt).
