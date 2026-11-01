@@ -248,7 +248,7 @@ async function collectPending() {
         resources: p.resources,
         message: p.message,
         from_subagent: p.sessionID !== jobs.get(jobId).sessionID,
-        reply_with: "reply(job, request_id, decision)",
+        reply_with: "approve(job, request_id, scope, action, resources) or reject(job, request_id)",
         _session: p.sessionID,
       });
     }
@@ -259,7 +259,7 @@ async function collectPending() {
         kind: "question",
         form_id: f.id,
         title: f.title,
-        fields: (f.fields ?? []).map((x) => ({ key: x.key, type: x.type, options: x.options, default: x.default, placeholder: x.placeholder })),
+        fields: (f.fields ?? []).map(({ when, hidden, ...x }) => x),
         from_subagent: f.sessionID !== jobs.get(jobId).sessionID,
         reply_with: "answer(job, form_id, answers)",
         _session: f.sessionID,
@@ -282,6 +282,7 @@ async function jobSnapshot(id, pendingByJob, { full = true } = {}) {
   const pending = (pendingMap.get(id) ?? []).map(({ _session, ...rest }) => rest);
   const info = sess?.data ?? {};
   const subagents = (kids?.data ?? []).map((k) => ({ session: k.id, agent: k.agent, running: Boolean(activeMap[k.id]) }));
+  job.childSessions = subagents.map((k) => k.session);
   let status;
   if (job.promptError) status = "failed";
   else if (pending.some((p) => p.kind === "permission")) status = "needs_permission";
@@ -313,16 +314,139 @@ const ATTENTION = new Set(["needs_permission", "needs_answer", "done", "failed",
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const asText = (obj) => ({ content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj, null, 2) }] });
 const asError = (e) => ({ isError: true, content: [{ type: "text", text: String(e?.message ?? e) }] });
-const tool = (fn) => async (args) => {
+const tool = (fn) => async (args, extra) => {
   try {
-    return asText(await fn(args));
+    return asText(await fn(args, extra));
   } catch (e) {
     return asError(e);
   }
 };
 
+
+// ---------- activity feed (also written to a per-job log you can tail) ----------
+const LOG_DIR = path.join(os.homedir(), ".opencode-navigator", "logs");
+const loggedParts = new Set();
+
+function brief(input) {
+  if (!input || typeof input !== "object") return "";
+  const v = input.command ?? input.filePath ?? input.file ?? input.path ?? input.description ?? input.pattern ?? input.query ?? input.prompt ?? JSON.stringify(input);
+  return String(v).replace(/\s+/g, " ").slice(0, 110);
+}
+
+async function recentActivity(job, limit = 6) {
+  const sessions = [job.sessionID, ...(job.childSessions ?? [])];
+  const lines = [];
+  await Promise.all(
+    sessions.map(async (sid) => {
+      const r = await api("GET", `/api/session/${sid}/message`, { query: { order: "desc", limit: 10, type: "assistant" }, directory: job.directory }).catch(() => null);
+      for (const m of r?.data ?? []) {
+        for (const part of m.content ?? []) {
+          if (part.type !== "tool") continue;
+          lines.push({ t: m.time?.created ?? 0, key: `${part.id}:${part.state?.status}`, sub: sid !== job.sessionID, text: `${part.state?.status ?? "?"} ${part.name}: ${brief(part.state?.input)}` });
+        }
+      }
+    }),
+  );
+  lines.sort((a, b) => a.t - b.t);
+  const fresh = lines.filter((l) => !loggedParts.has(`${job.id}:${l.key}`));
+  if (fresh.length) {
+    await fs.mkdir(LOG_DIR, { recursive: true });
+    const stamp = new Date().toTimeString().slice(0, 8);
+    await fs.appendFile(path.join(LOG_DIR, `${job.id}.log`), fresh.map((l) => `${stamp} ${l.sub ? "[subagent] " : ""}${l.text}`).join("\n") + "\n");
+    fresh.forEach((l) => loggedParts.add(`${job.id}:${l.key}`));
+  }
+  return lines.slice(-limit).map((l) => (l.sub ? "[subagent] " : "") + l.text);
+}
+
+let progressTick = 0;
+async function progress(extra, message) {
+  const token = extra?._meta?.progressToken;
+  if (token == null) return;
+  await extra.sendNotification({ method: "notifications/progress", params: { progressToken: token, progress: ++progressTick, message } }).catch(() => {});
+}
+
+// ---------- approvals: native dialog (MCP elicitation) or relay through Claude ----------
+const clientCanElicit = () => Boolean(mcp.server.getClientCapabilities()?.elicitation);
+async function approvalMode() {
+  const want = (await readState()).approvalUi ?? process.env.OPENCODE_NAVIGATOR_APPROVALS ?? "elicit";
+  return want === "elicit" && clientCanElicit() ? "elicit" : "relay";
+}
+
+async function sendPermission(j, sid, requestId, decision, message) {
+  await api("POST", `/api/session/${sid}/permission/${requestId}/reply`, { body: { decision, message: message ?? null }, directory: j.directory });
+}
+async function sendAnswer(j, sid, formId, answers, cancel) {
+  if (cancel) await api("DELETE", `/api/session/${sid}/form/${formId}`, { directory: j.directory });
+  else await api("POST", `/api/session/${sid}/form/${formId}/reply`, { body: { answer: answers ?? {} }, directory: j.directory });
+}
+
+function fieldSchema(f) {
+  const title = f.title ?? f.label ?? f.question ?? f.key;
+  const description = f.description ?? f.placeholder;
+  const base = { title: String(title), ...(description ? { description: String(description) } : {}) };
+  const values = (f.options ?? []).map((o) => o.value);
+  if (f.type === "string") return values.length ? { ...base, type: "string", enum: values, ...(f.default ? { default: f.default } : {}) } : { ...base, type: "string" };
+  if (f.type === "number" || f.type === "integer") return { ...base, type: f.type };
+  if (f.type === "boolean") return { ...base, type: "boolean" };
+  if (f.type === "multiselect" && values.length) return { ...base, type: "array", items: { type: "string", enum: values } };
+  return null; // e.g. "external": cannot be shown in a dialog
+}
+
+const dismissed = new Set(); // items the user closed without deciding; handed to Claude instead of asking again
+
+// Ask the user directly. Returns true if anything was answered.
+async function autoResolve() {
+  if (!jobs.size || (await approvalMode()) !== "elicit") return false;
+  const pendingMap = await collectPending();
+  let acted = false;
+  for (const [jobId, items] of pendingMap) {
+    const job = jobs.get(jobId);
+    const who = `${job.label ? job.label + " · " : ""}${job.modelLabel} · ${jobId}`;
+    for (const p of items) {
+      const key = p.request_id ?? p.form_id;
+      if (dismissed.has(key)) continue;
+      try {
+        if (p.kind === "permission") {
+          const r = await mcp.server.elicitInput(
+            {
+              message: `opencode${p.from_subagent ? " subagent" : ""} wants to ${p.action}:\n${(p.resources ?? []).join("\n")}\n\n${who}`,
+              requestedSchema: { type: "object", properties: { decision: { type: "string", title: "Decision (once / always / reject)", enum: ["once", "always", "reject"], default: "once" } }, required: ["decision"] },
+            },
+            { timeout: 300000 },
+          );
+          if (r.action === "accept") await sendPermission(job, p._session, p.request_id, r.content?.decision ?? "reject");
+          else if (r.action === "decline") await sendPermission(job, p._session, p.request_id, "reject", "Rejected by user");
+          else {
+            dismissed.add(key);
+            continue;
+          }
+          acted = true;
+        } else {
+          const properties = {};
+          for (const f of p.fields) {
+            const sch = fieldSchema(f);
+            if (!sch) throw new Error("unsupported field");
+            properties[f.key] = sch;
+          }
+          const r = await mcp.server.elicitInput({ message: `opencode asks (${who}):\n${p.title ?? ""}`, requestedSchema: { type: "object", properties } }, { timeout: 300000 });
+          if (r.action === "accept") await sendAnswer(job, p._session, p.form_id, r.content ?? {});
+          else if (r.action === "decline") await sendAnswer(job, p._session, p.form_id, null, true);
+          else {
+            dismissed.add(key);
+            continue;
+          }
+          acted = true;
+        }
+      } catch {
+        dismissed.add(key); // unsupported or dialog failed: fall back to relaying via Claude
+      }
+    }
+  }
+  return acted;
+}
+
 // ---------- MCP server ----------
-const mcp = new McpServer({ name: "opencode-navigator", version: "0.2.0" });
+const mcp = new McpServer({ name: "opencode-navigator", version: "0.3.0" });
 
 mcp.registerTool(
   "list_models",
@@ -428,16 +552,24 @@ mcp.registerTool(
   "check",
   {
     description:
-      "Status of one job: running | needs_permission | needs_answer | done | failed | cancelled. Waits up to wait_seconds (max 120) for it to need attention or finish. " +
-      "Pending permissions/questions (including from opencode's own subagents) are listed under `pending`: show them to the user, then call reply() or answer().",
+      "Status of one job: running | needs_permission | needs_answer | done | failed | cancelled, plus a short `activity` feed of what opencode just did. Waits up to wait_seconds (max 120). " +
+      "If the client can show dialogs, permission requests and questions are put to the user right here as native dialogs and handled automatically. " +
+      "Anything still unresolved is listed under `pending`: for permissions call approve() (after the user's OK) or reject(); for questions relay to the user and call answer().",
     inputSchema: { job: z.string(), wait_seconds: z.number().int().min(0).max(120).optional() },
   },
-  tool(async ({ job, wait_seconds }) => {
+  tool(async ({ job, wait_seconds }, extra) => {
+    const j = getJob(job);
     const deadline = Date.now() + (wait_seconds ?? 0) * 1000;
     for (;;) {
+      if (await autoResolve()) continue;
       const snap = await jobSnapshot(job);
-      if (ATTENTION.has(snap.status) || Date.now() >= deadline) return snap;
-      await sleep(1500);
+      if (ATTENTION.has(snap.status) || Date.now() >= deadline) {
+        snap.activity = await recentActivity(j);
+        return snap;
+      }
+      const act = await recentActivity(j, 1);
+      await progress(extra, `${j.label ?? job}: ${act[0] ?? "working"}`);
+      await sleep(2000);
     }
   }),
 );
@@ -446,15 +578,16 @@ mcp.registerTool(
   "check_all",
   {
     description:
-      "Status of every job at once, plus all pending permissions and questions in one list. With wait_seconds (max 120) it returns as soon as ANY job needs attention or finishes, " +
-      "so use it as the single polling call when several jobs run in parallel. Finished jobs you already reported can be hidden with only_active.",
+      "Status of every job at once, plus all unresolved permissions and questions in one list. With wait_seconds (max 120) it returns as soon as ANY job needs attention or finishes, " +
+      "so use it as the single polling call when several jobs run in parallel. If the client can show dialogs, requests are put to the user natively and handled automatically.",
     inputSchema: { wait_seconds: z.number().int().min(0).max(120).optional(), only_active: z.boolean().optional() },
   },
-  tool(async ({ wait_seconds, only_active }) => {
+  tool(async ({ wait_seconds, only_active }, extra) => {
     if (!jobs.size) return { jobs: [], note: "No jobs yet." };
     const deadline = Date.now() + (wait_seconds ?? 0) * 1000;
     const startStatus = new Map();
     for (;;) {
+      if (await autoResolve()) continue;
       const pendingMap = await collectPending();
       const snaps = await Promise.all([...jobs.keys()].map((id) => jobSnapshot(id, pendingMap, { full: false })));
       if (!startStatus.size) snaps.forEach((s) => startStatus.set(s.job, s.status));
@@ -462,6 +595,7 @@ mcp.registerTool(
       const waiting = snaps.some((s) => s.status === "needs_permission" || s.status === "needs_answer");
       if (changed || waiting || !wait_seconds || Date.now() >= deadline || snaps.every((s) => s.status !== "running")) {
         const list = only_active ? snaps.filter((s) => s.status === "running" || s.status.startsWith("needs_")) : snaps;
+        await Promise.all(list.filter((s) => s.status === "running").map(async (s) => (s.activity = await recentActivity(jobs.get(s.job), 3))));
         const pending = list.flatMap((s) => (s.pending ?? []).map((p) => ({ job: s.job, label: s.label, ...p })));
         return {
           summary: Object.fromEntries(["running", "needs_permission", "needs_answer", "done", "failed", "cancelled"].map((k) => [k, snaps.filter((s) => s.status === k).length])),
@@ -470,29 +604,76 @@ mcp.registerTool(
           note: "Use check(job) to read a finished job's result.",
         };
       }
-      await sleep(1500);
+      await progress(extra, snaps.map((s) => `${s.label ?? s.job}:${s.status}`).join(" "));
+      await sleep(2000);
     }
   }),
 );
 
 mcp.registerTool(
-  "reply",
+  "approve",
   {
-    description: "Answer an opencode permission request: once (this time), always (remember it), or reject. Only call this with the user's decision. Works for requests from opencode's subagents too.",
+    description:
+      "Approve an opencode permission request (scope once, or always to remember it). Claude Code shows the user its own approval prompt for every call, with the exact action and resources below, " +
+      "so pass them exactly as listed in `pending` (the call fails if they don't match the real request). A denied prompt means the user said no: then call reject().",
     inputSchema: {
       job: z.string(),
       request_id: z.string(),
-      decision: z.enum(["once", "always", "reject"]),
-      message: z.string().optional().describe("Optional note shown to the model, e.g. why it was rejected"),
+      scope: z.enum(["once", "always"]),
+      action: z.string().describe("The request's action, e.g. edit or shell"),
+      resources: z.array(z.string()).describe("The request's resources, e.g. file paths or commands"),
     },
+    _meta: { "anthropic/requiresUserInteraction": true },
   },
-  tool(async ({ job, request_id, decision, message }) => {
+  tool(async ({ job, request_id, scope, action, resources }) => {
     const j = getJob(job);
-    const pending = (await collectPending()).get(job) ?? [];
-    const target = pending.find((p) => p.request_id === request_id);
+    const target = ((await collectPending()).get(job) ?? []).find((p) => p.request_id === request_id);
     if (!target) throw new Error(`No pending permission ${request_id} on ${job}; it may already be answered. Call check(${job}).`);
-    await api("POST", `/api/session/${target._session}/permission/${request_id}/reply`, { body: { decision, message: message ?? null }, directory: j.directory });
-    return { ok: true, request_id, decision };
+    if (target.action !== action || JSON.stringify(target.resources) !== JSON.stringify(resources))
+      throw new Error(`Mismatch: the real request is ${target.action}: ${JSON.stringify(target.resources)}. Nothing was approved.`);
+    await sendPermission(j, target._session, request_id, scope);
+    return { ok: true, request_id, decision: scope };
+  }),
+);
+
+mcp.registerTool(
+  "reject",
+  {
+    description: "Reject an opencode permission request (use when the user says no or denies the approve prompt). Safe: never unlocks anything.",
+    inputSchema: { job: z.string(), request_id: z.string(), message: z.string().optional().describe("Optional note for opencode, e.g. why") },
+  },
+  tool(async ({ job, request_id, message }) => {
+    const j = getJob(job);
+    const target = ((await collectPending()).get(job) ?? []).find((p) => p.request_id === request_id);
+    if (!target) throw new Error(`No pending permission ${request_id} on ${job}; it may already be answered.`);
+    await sendPermission(j, target._session, request_id, "reject", message);
+    return { ok: true, request_id, decision: "reject" };
+  }),
+);
+
+mcp.registerTool(
+  "bridge_info",
+  { description: "Show how this bridge reaches the user: whether native dialogs (elicitation) are available and in use, active jobs, log folder.", inputSchema: {} },
+  tool(async () => ({
+    client: mcp.server.getClientVersion?.(),
+    client_supports_dialogs: clientCanElicit(),
+    approvals: await approvalMode(),
+    jobs: jobs.size,
+    max_parallel_jobs: MAX_RUNNING,
+    job_logs: LOG_DIR,
+    tip: "tail -f <job_logs>/<job>.log in a terminal to watch a job live",
+  })),
+);
+
+mcp.registerTool(
+  "set_approval_ui",
+  {
+    description: "Choose how permissions/questions reach the user. 'elicit' = native dialogs from the bridge (needs client support); 'relay' = return them to Claude, which asks the user. Switch to relay if dialogs don't appear.",
+    inputSchema: { mode: z.enum(["elicit", "relay"]) },
+  },
+  tool(async ({ mode }) => {
+    await writeState({ approvalUi: mode });
+    return { approvals: await approvalMode(), requested: mode };
   }),
 );
 
@@ -513,9 +694,7 @@ mcp.registerTool(
     const j = getJob(job);
     const target = ((await collectPending()).get(job) ?? []).find((p) => p.form_id === form_id);
     if (!target) throw new Error(`No pending question ${form_id} on ${job}; it may already be answered. Call check(${job}).`);
-    const sid = target._session;
-    if (cancel) await api("DELETE", `/api/session/${sid}/form/${form_id}`, { directory: j.directory });
-    else await api("POST", `/api/session/${sid}/form/${form_id}/reply`, { body: { answer: answers ?? {} }, directory: j.directory });
+    await sendAnswer(j, target._session, form_id, answers, cancel);
     return { ok: true, form_id, cancelled: Boolean(cancel) };
   }),
 );
