@@ -393,6 +393,11 @@ function fieldSchema(f) {
 }
 
 const dismissed = new Set(); // items the user closed without deciding; handed to Claude instead of asking again
+const inflight = new Set(); // items a dialog is currently open for (several check calls may run at once)
+async function debugLog(line) {
+  await fs.mkdir(LOG_DIR, { recursive: true });
+  await fs.appendFile(path.join(LOG_DIR, "bridge.log"), `${new Date().toISOString()} ${line}\n`).catch(() => {});
+}
 
 // Ask the user directly. Returns true if anything was answered.
 async function autoResolve() {
@@ -404,7 +409,8 @@ async function autoResolve() {
     const who = `${job.label ? job.label + " · " : ""}${job.modelLabel} · ${jobId}`;
     for (const p of items) {
       const key = p.request_id ?? p.form_id;
-      if (dismissed.has(key)) continue;
+      if (dismissed.has(key) || inflight.has(key)) continue;
+      inflight.add(key);
       try {
         if (p.kind === "permission") {
           const r = await mcp.server.elicitInput(
@@ -414,13 +420,13 @@ async function autoResolve() {
             },
             { timeout: 300000 },
           );
-          if (r.action === "accept") await sendPermission(job, p._session, p.request_id, r.content?.decision ?? "reject");
-          else if (r.action === "decline") await sendPermission(job, p._session, p.request_id, "reject", "Rejected by user");
-          else {
-            dismissed.add(key);
-            continue;
-          }
-          acted = true;
+          await debugLog(`elicit permission ${p.action} ${JSON.stringify(p.resources)} -> ${r.action} ${JSON.stringify(r.content ?? {})}`);
+          // Only an explicit answer counts. A declined/cancelled/auto-dismissed dialog is NOT a user decision:
+          // hand the request to Claude instead (approve() shows Claude Code's own prompt).
+          if (r.action === "accept" && ["once", "always", "reject"].includes(r.content?.decision)) {
+            await sendPermission(job, p._session, p.request_id, r.content.decision, r.content.decision === "reject" ? "Rejected by user" : undefined);
+            acted = true;
+          } else dismissed.add(key);
         } else {
           const properties = {};
           for (const f of p.fields) {
@@ -429,16 +435,17 @@ async function autoResolve() {
             properties[f.key] = sch;
           }
           const r = await mcp.server.elicitInput({ message: `opencode asks (${who}):\n${p.title ?? ""}`, requestedSchema: { type: "object", properties } }, { timeout: 300000 });
-          if (r.action === "accept") await sendAnswer(job, p._session, p.form_id, r.content ?? {});
-          else if (r.action === "decline") await sendAnswer(job, p._session, p.form_id, null, true);
-          else {
-            dismissed.add(key);
-            continue;
-          }
-          acted = true;
+          await debugLog(`elicit question ${p.form_id} -> ${r.action} ${JSON.stringify(r.content ?? {})}`);
+          if (r.action === "accept") {
+            await sendAnswer(job, p._session, p.form_id, r.content ?? {});
+            acted = true;
+          } else dismissed.add(key); // let Claude relay it; do not cancel the question for the user
         }
-      } catch {
+      } catch (e) {
+        await debugLog(`elicit failed for ${key}: ${String(e?.message ?? e)}`);
         dismissed.add(key); // unsupported or dialog failed: fall back to relaying via Claude
+      } finally {
+        inflight.delete(key);
       }
     }
   }
@@ -538,7 +545,10 @@ mcp.registerTool(
     jobs.set(jobId, job);
     sessionRoot.set(sessionID, jobId);
     // The prompt call may block until the run ends, so don't await it.
-    api("POST", `/api/session/${sessionID}/prompt`, { body: { text: prompt }, directory })
+    const preface = wt
+      ? `[Your working directory is ${directory}. Work only inside it, using relative paths. Do not read or edit ${wt.repo}; it is the original checkout and is off limits.]\n\n`
+      : "";
+    api("POST", `/api/session/${sessionID}/prompt`, { body: { text: preface + prompt }, directory })
       .then(() => (job.promptDone = true))
       .catch((e) => {
         job.promptDone = true;

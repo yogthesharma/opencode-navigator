@@ -12,8 +12,9 @@ c.setRequestHandler(ElicitRequestSchema, async (req) => {
   for (const [k, v] of Object.entries(requestedSchema.properties)) {
     content[k] = k === "decision" ? decision : v.enum ? v.enum[0] : v.type === "boolean" ? true : "x";
   }
-  console.log("  user answers:", JSON.stringify(content));
-  return { action: "accept", content };
+  const act = process.env.ELICIT_ACTION || "accept";
+  console.log("  user action:", act, act === "accept" ? JSON.stringify(content) : "");
+  return act === "accept" ? { action: "accept", content } : { action: act };
 });
 await c.connect(new StdioClientTransport({ command: "node", args: ["server.mjs"] }));
 const call = async (name, args) => {
@@ -22,10 +23,13 @@ const call = async (name, args) => {
   return JSON.parse(r.content[0].text);
 };
 console.log("INFO", JSON.stringify(await call("bridge_info", {})));
-const j = await call("run", { prompt, model, cwd: repo, mode: "ask" });
+const j = await call("run", { prompt, model, cwd: repo, mode: "ask", worktree: process.env.WORKTREE === "1" });
 for (let i = 0; i < 20; i++) {
   const s = await call("check", { job: j.job, wait_seconds: 30 });
   console.log("STATUS", s.status, "pending:", (s.pending ?? []).length, "activity:", JSON.stringify(s.activity));
+  for (const p of s.pending ?? []) {
+    if (p.kind === "permission") console.log("FALLBACK approve ->", JSON.stringify(await call("approve", { job: j.job, request_id: p.request_id, scope: "once", action: p.action, resources: p.resources })));
+  }
   if (!["running", "needs_permission", "needs_answer"].includes(s.status)) {
     console.log("RESULT", JSON.stringify(s.result));
     break;
