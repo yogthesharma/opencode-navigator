@@ -652,6 +652,43 @@ mcp.registerTool(
 );
 
 mcp.registerTool(
+  "list_saved_permissions",
+  {
+    description:
+      "List permissions opencode has remembered for a project (from earlier 'always' answers). While a rule such as edit * is saved, matching requests are never asked about. " +
+      "Defaults to the directory of the most recent job, else the bridge's working directory.",
+    inputSchema: { directory: z.string().optional() },
+  },
+  tool(async ({ directory }) => {
+    const last = [...jobs.values()].at(-1);
+    const dir = path.resolve(directory ?? last?.directory ?? process.cwd());
+    const r = await api("GET", "/api/permission/saved", { directory: dir });
+    return {
+      directory: dir,
+      saved: (r?.data ?? []).map((p) => ({ id: p.id, action: p.action, resource: p.resource, created: new Date(p.time?.created ?? 0).toISOString() })),
+      next: "revoke_permission(id, directory) removes one; opencode will ask again next time.",
+    };
+  }),
+);
+
+mcp.registerTool(
+  "revoke_permission",
+  {
+    description: "Remove one remembered permission (id from list_saved_permissions). Claude Code shows the user an approval prompt for this call. Afterwards opencode asks again for matching requests.",
+    inputSchema: { id: z.string().regex(/^psv_/), directory: z.string().describe("The directory list_saved_permissions reported"), action: z.string().describe("The rule's action, echoed from the listing"), resource: z.string().describe("The rule's resource, echoed from the listing") },
+    _meta: { "anthropic/requiresUserInteraction": true },
+  },
+  tool(async ({ id, directory, action, resource }) => {
+    const dir = path.resolve(directory);
+    const rule = ((await api("GET", "/api/permission/saved", { directory: dir }))?.data ?? []).find((p) => p.id === id);
+    if (!rule) throw new Error(`No saved permission ${id} in ${dir}. Call list_saved_permissions.`);
+    if (rule.action !== action || rule.resource !== resource) throw new Error(`Mismatch: ${id} is ${rule.action} ${rule.resource}. Nothing was removed.`);
+    await api("DELETE", `/api/permission/saved/${id}`, { directory: dir });
+    return { ok: true, removed: { id, action, resource }, directory: dir };
+  }),
+);
+
+mcp.registerTool(
   "bridge_info",
   { description: "Show how this bridge reaches the user: whether native dialogs (elicitation) are available and in use, active jobs, log folder.", inputSchema: {} },
   tool(async () => ({

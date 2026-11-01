@@ -11,6 +11,7 @@ The main conversation plans, reviews (`git diff`), and talks to the user.
 - **Native dialogs (preferred):** if the client supports MCP elicitation, `check`/`check_all` put each opencode permission request and question to the user as a dialog automatically. Check with `bridge_info`; switch with `set_approval_ui` (`elicit` | `relay`) if dialogs don't show up.
 - **Claude Code approval prompt (fallback):** otherwise requests come back as `pending`. Approving is done with `approve(...)`, which always triggers Claude Code's own permission prompt showing the exact action and resources (the call fails if they don't match the real request). A denied prompt = `reject`.
 - **Questions in fallback mode:** subagents cannot ask the user. The worker reports `BLOCKED` with the question; the main conversation asks the user (AskUserQuestion) and calls `answer(job, form_id, answers)` keyed by field key (`cancel: true` dismisses), then resumes the worker with SendMessage.
+- **Remembered permissions:** answering `always` saves a rule per project (e.g. `edit *`), after which matching requests are never asked about. `list_saved_permissions` shows them; `revoke_permission` removes one (Claude Code shows the user an approval prompt). If a job edits files without asking, check this first.
 - Never approve or answer on the user's behalf.
 
 ## Workflow (tools)
