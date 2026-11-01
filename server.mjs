@@ -729,7 +729,7 @@ async function autoResolve() {
 
 // ---------- starting jobs ----------
 async function startJob(o) {
-  const { prompt, model, task_type, cwd, mode = "ask", agent, worktree, label, allowed_paths, max_cost, verify, review, report = true, internal } = o;
+  const { prompt, model, task_type, cwd, mode: requestedMode, agent, worktree, label, allowed_paths, max_cost, verify, review, report = true, internal } = o;
   const runningNow = [...jobs.values()].filter((j) => !j.finalized).length;
   if (!internal && runningNow >= MAX_RUNNING) throw new Error(`${runningNow} jobs are already running (limit ${MAX_RUNNING}, env OPENCODE_NAVIGATOR_MAX_JOBS). Wait for one to finish with check_all, or cancel one.`);
   const state = await readState();
@@ -737,6 +737,13 @@ async function startJob(o) {
   if (modelLabel) parseModel(modelLabel);
   let directory = path.resolve(cwd ?? process.cwd());
   await fs.access(directory);
+  // No explicit mode: use the saved default. A default of "auto" only applies inside a git repo (edits are revertable there).
+  let mode = requestedMode ?? state.defaultMode ?? "ask";
+  let modeNote;
+  if (!requestedMode && mode === "auto" && !(await repoTop(directory))) {
+    mode = "ask";
+    modeNote = `Default mode is auto, but ${directory} is not a git repo, so this job uses ask (edits there could not be undone). Pass mode:"auto" to override.`;
+  }
   const config = await readProjectConfig(directory);
   if (verify && !config.verify) throw new Error(`verify:true needs a "verify" command in ${PROJECT_CONFIG} at the project root, e.g. {"verify": "npm test"}.`);
   const jobId = newJobId();
@@ -786,7 +793,7 @@ async function startJob(o) {
       job.promptError = String(e.message ?? e);
       persist();
     });
-  return { job: jobId, status: "running", model: job.modelLabel, mode, directory, worktree: wt ? { branch: wt.branch, path: wt.root } : undefined, next: "check(job, wait_seconds) or check_all(wait_seconds)" };
+  return { job: jobId, status: "running", model: job.modelLabel, mode, ...(modeNote ? { note: modeNote } : {}), directory, worktree: wt ? { branch: wt.branch, path: wt.root } : undefined, next: "check(job, wait_seconds) or check_all(wait_seconds)" };
 }
 
 // ---------- background watcher: budget caps, completion handling, notifications ----------
@@ -842,7 +849,7 @@ const tool = (fn) => async (args, extra) => {
 
 const mcp = new McpServer({
   name: "opencode-navigator",
-  version: "0.4.0",
+  version: "0.5.0",
 }, {
   instructions:
     "Delegates coding work to opencode. Start with run(); follow with check/check_all; review with diff/verify/review; finish worktrees with worktree_finish. " +
@@ -887,6 +894,20 @@ mcp.registerTool(
     await assertKnownModel(model);
     await writeState({ defaultModel: model });
     return { default_model: model };
+  }),
+);
+
+mcp.registerTool(
+  "set_default_mode",
+  {
+    description:
+      "Set the permission mode used when run() gets no mode. 'auto' = opencode edits and runs commands without asking (destructive commands like rm -r, sudo, git push stay blocked; applies only inside git repos); " +
+      "'ask' = prompt for every edit/command; 'readonly'. An explicit mode on run() always wins.",
+    inputSchema: { mode: z.enum(["ask", "auto", "readonly"]) },
+  },
+  tool(async ({ mode }) => {
+    await writeState({ defaultMode: mode });
+    return { default_mode: mode, note: mode === "auto" ? "Jobs in git repos now run without per-file approval prompts; non-git folders still ask." : undefined };
   }),
 );
 
@@ -1363,6 +1384,7 @@ mcp.registerTool(
       client: mcp.server.getClientVersion?.(),
       client_supports_dialogs: clientCanElicit(),
       approvals: await approvalMode(),
+      default_mode: s.defaultMode ?? "ask",
       notifications: s.notifications !== false && process.platform === "darwin",
       jobs_total: jobs.size,
       jobs_running: [...jobs.values()].filter((j) => !j.finalized).length,

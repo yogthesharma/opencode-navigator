@@ -32,9 +32,11 @@ Create `.opencode-navigator.json` in the repo root (see `.opencode-navigator.exa
 - opencode can spawn its own subagents inside a job (`subagents` in the status). Their approvals and questions are handled like the job's own.
 
 ## Modes
-- `ask` (default): reads, questions and subagent spawning are allowed; edits and commands need approval; destructive shell denied.
-- `auto`: everything allowed except the deny list. Only in a git repo or worktree.
+The default mode is saved (`set_default_mode`, shown in `bridge_info`); an explicit `mode` on `run` always wins. Currently the default is `auto`, so jobs in git repos run without per-file prompts. Non-git folders fall back to `ask`, because edits there can't be undone.
+- `ask`: reads, questions and subagent spawning are allowed; edits and commands need approval; destructive shell denied.
+- `auto`: everything allowed except the destructive deny list (rm -r, sudo, git push, git reset --hard, git clean, curl | sh, dd, mkfs, chmod/chown -R).
 - `readonly`: exploration only.
+In `auto` the safety net is git: use `worktree: true` for isolation and review `diff` / `git diff` before merging or committing.
 
 Free models may log prompts; keep secrets out of briefs. Jobs live only while the MCP server process runs.
 
