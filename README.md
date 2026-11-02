@@ -17,7 +17,7 @@ An MCP server that lets Claude Code plan while cheaper (or free) models do the c
 
 ## Install
 ```bash
-git clone <this repo> && cd opencode-navigator
+git clone https://github.com/yogthesharma/opencode-navigator.git && cd opencode-navigator
 npm install
 ```
 
