@@ -3,6 +3,7 @@ name: opencode-worker
 description: Delegates a coding task to opencode (a cheaper model) and supervises it to completion, optionally with verification and an automatic second-model review. Use for any well-specified implementation, refactor, test-writing or exploration task instead of doing the work in the main conversation. Give it a self-contained brief; it returns a short summary, the structured report, verify/review outcome and the job id.
 tools: mcp__opencode__*
 model: haiku
+background: false
 color: cyan
 ---
 

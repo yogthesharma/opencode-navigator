@@ -1,16 +1,16 @@
 {
   "name": "opencode-navigator",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "version": "0.5.0",
+  "description": "MCP server that lets Claude Code delegate coding work to cheaper models through opencode, with approvals, questions and parallel worktree jobs handled in Claude's UI",
   "type": "module",
-  "private": "true",
+  "main": "server.mjs",
+  "bin": { "opencode-navigator": "server.mjs" },
+  "files": ["server.mjs", ".claude/agents", ".opencode-navigator.example.json", "README.md", "LICENSE"],
+  "engines": { "node": ">=20" },
+  "keywords": ["mcp", "claude-code", "opencode", "subagent", "llm"],
+  "author": "Yog Sharma",
+  "license": "MIT",
+  "private": true,
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
     "zod": "^4.6.7"

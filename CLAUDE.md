@@ -43,5 +43,6 @@ Free models may log prompts; keep secrets out of briefs. Jobs live only while th
 ## Testing
 `node test/client.mjs <tool> '<json>'` (single tool), `test/e2e.mjs` (approval round trip), `test/parallel.mjs` (two worktree jobs, merge), `test/interact.mjs` (questions and subagents), `test/dialog.mjs` (simulated native dialogs), `test/features.mjs` (routing, scope, verify, review, secrets, persistence), `test/saved.mjs` (saved permissions).
 
-## Long jobs
-`check`/`check_all` wait up to 120 s per call and the worker loops until the job ends, so a long job simply keeps the worker running. To keep the main conversation free meanwhile, spawn the worker with `run_in_background: true`; it reports when finished and any approval prompts still reach the user. Jobs also survive a restart (`jobs.json`), so a new session can pick one up with `check_all`.
+## Waiting for jobs
+Claude must stay in the turn until the jobs finish. Start workers in the **foreground**: never pass `run_in_background` to the Agent tool. Launch independent workers as several Agent calls in one message; they run in parallel and the turn waits for all of them, however long they take. A background launch ends the turn at once and the user has to ask for status.
+Each worker loops `check(job, wait_seconds: 30)` until its job ends, so no single call times out. If you do run a worker in the background (the user asked for it), keep the turn open with `check_all(wait_seconds: 120)` in a loop until nothing is `running`, then review. Jobs survive a restart (`jobs.json`), so a new session can pick one up with `check_all`.
