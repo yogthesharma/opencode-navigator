@@ -856,6 +856,26 @@ const mcp = new McpServer({
     "Results are compact on purpose: full output and patches are in files (result_file, patch_file) that you read only if needed. Never approve permissions or answer questions on the user's behalf.",
 });
 
+// Behaviour hints for hosts, per tool: [readOnly, destructive, idempotent, openWorld].
+// openWorld = the call sends content to an external model provider.
+const HINTS = {
+  list_models: [1, 0, 1, 0], list_agents: [1, 0, 1, 0], get_default_model: [1, 0, 1, 0],
+  set_default_model: [0, 0, 1, 0], set_default_mode: [0, 0, 1, 0], set_routing: [0, 0, 1, 0],
+  run: [0, 0, 0, 1], check: [0, 0, 1, 0], check_all: [0, 0, 1, 0],
+  approve: [0, 0, 0, 0], reject: [0, 0, 1, 0], answer: [0, 0, 0, 0], send_message: [0, 0, 0, 1],
+  cancel: [0, 1, 1, 0], diff: [1, 0, 1, 0], verify: [0, 0, 0, 0], review: [0, 0, 0, 1],
+  worktree_finish: [0, 1, 0, 0], list_stale_worktrees: [1, 0, 1, 0], remove_worktrees: [0, 1, 1, 0],
+  usage: [1, 0, 1, 0], list_saved_permissions: [1, 0, 1, 0], revoke_permission: [0, 1, 1, 0],
+  bridge_info: [1, 0, 1, 0], set_approval_ui: [0, 0, 1, 0], set_notifications: [0, 0, 1, 0],
+};
+const registerTool = mcp.registerTool.bind(mcp);
+mcp.registerTool = (name, config, cb) => {
+  const h = HINTS[name];
+  if (!h) throw new Error(`No annotations declared for tool ${name}`);
+  const [readOnlyHint, destructiveHint, idempotentHint, openWorldHint] = h.map(Boolean);
+  return registerTool(name, { ...config, annotations: { readOnlyHint, destructiveHint, idempotentHint, openWorldHint } }, cb);
+};
+
 mcp.registerTool(
   "list_models",
   {

@@ -63,7 +63,7 @@ State lives in `~/.opencode-navigator` (jobs, results, logs, worktrees, cost led
 - Worktree merges refuse on secret-looking strings; `force` is for use after you agree.
 
 ## Tests
-Integration scripts in `test/` drive the server over stdio and need a working opencode: `node test/e2e.mjs`, `parallel.mjs`, `interact.mjs`, `dialog.mjs`, `features.mjs`, `saved.mjs`, `modes.mjs`. They call real models, so they can be slow or hit free-tier limits.
+`node test/tools.mjs` runs offline: it checks tool annotations and the tools that need no job. The other integration scripts in `test/` drive the server over stdio and need a working opencode: `node test/e2e.mjs`, `parallel.mjs`, `interact.mjs`, `dialog.mjs`, `features.mjs`, `saved.mjs`, `modes.mjs` (needs a git dir and a non-git dir as arguments). They call real models, so they can be slow or hit free-tier limits.
 
 ## License
 MIT

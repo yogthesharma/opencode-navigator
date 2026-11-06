@@ -41,7 +41,7 @@ In `auto` the safety net is git: use `worktree: true` for isolation and review `
 Free models may log prompts; keep secrets out of briefs. Jobs live only while the MCP server process runs.
 
 ## Testing
-`node test/client.mjs <tool> '<json>'` (single tool), `test/e2e.mjs` (approval round trip), `test/parallel.mjs` (two worktree jobs, merge), `test/interact.mjs` (questions and subagents), `test/dialog.mjs` (simulated native dialogs), `test/features.mjs` (routing, scope, verify, review, secrets, persistence), `test/saved.mjs` (saved permissions).
+`node test/client.mjs <tool> '<json>'` (single tool), `test/e2e.mjs` (approval round trip), `test/parallel.mjs` (two worktree jobs, merge), `test/interact.mjs` (questions and subagents), `test/dialog.mjs` (simulated native dialogs), `test/features.mjs` (routing, scope, verify, review, secrets, persistence), `test/saved.mjs` (saved permissions), `test/tools.mjs` (offline: tool annotations and the job-free tools). Some scripts need arguments (a repo path, a model): read the header before running them, because without them they run in the current directory.
 
 ## Waiting for jobs
 Claude must stay in the turn until the jobs finish. Start workers in the **foreground**: never pass `run_in_background` to the Agent tool. Launch independent workers as several Agent calls in one message; they run in parallel and the turn waits for all of them, however long they take. A background launch ends the turn at once and the user has to ask for status.
