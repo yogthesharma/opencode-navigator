@@ -12,7 +12,8 @@
     ".claude/agents",
     ".opencode-navigator.example.json",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "AGENTS.md"
   ],
   "engines": {
     "node": ">=20"

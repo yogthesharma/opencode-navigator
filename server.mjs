@@ -1054,11 +1054,25 @@ mcp.registerTool(
   }),
 );
 
+// approve, remove_worktrees and revoke_permission are only safe when the client shows the user a prompt for each call.
+// Claude Code does. Other clients may auto-run tools, so these refuse unless the user opted in.
+const TRUSTED_CLIENTS = new Set(["claude-code"]);
+function assertPromptingClient(toolName) {
+  if (process.env.OPENCODE_NAVIGATOR_TRUST_CLIENT === "1") return;
+  const name = mcp.server.getClientVersion?.()?.name;
+  if (name && TRUSTED_CLIENTS.has(name)) return;
+  throw new Error(
+    `${toolName} refused: client "${name ?? "unknown"}" is not known to ask the user before running a tool, so it could be called without anyone approving. ` +
+      `If your client prompts for every tool call (auto-run off), set OPENCODE_NAVIGATOR_TRUST_CLIENT=1 in the MCP server's environment. ` +
+      `Otherwise run jobs with mode "auto" or "readonly", which need no approvals.`,
+  );
+}
+
 mcp.registerTool(
   "approve",
   {
     description:
-      "Approve an opencode permission request (scope once, or always to remember it). Claude Code shows the user its own approval prompt for every call, with the exact action and resources below, " +
+      "Approve an opencode permission request (scope once, or always to remember it). Claude Code shows the user its own approval prompt for every call, with the exact action and resources below (other clients are refused unless OPENCODE_NAVIGATOR_TRUST_CLIENT=1 is set), " +
       "so pass them exactly as listed in `pending` (the call fails if they don't match the real request). A denied prompt means the user said no: then call reject().",
     inputSchema: {
       job: z.string(),
@@ -1070,6 +1084,7 @@ mcp.registerTool(
     _meta: { "anthropic/requiresUserInteraction": true },
   },
   tool(async ({ job, request_id, scope, action, resources }) => {
+    assertPromptingClient("approve");
     const j = getJob(job);
     const target = ((await collectPending()).get(job) ?? []).find((p) => p.request_id === request_id);
     if (!target) throw new Error(`No pending permission ${request_id} on ${job}; it may already be answered. Call check(${job}).`);
@@ -1307,6 +1322,7 @@ mcp.registerTool(
     _meta: { "anthropic/requiresUserInteraction": true },
   },
   tool(async ({ paths, unmerged_ok }) => {
+    assertPromptingClient("remove_worktrees");
     const known = await staleWorktrees({ older_than_hours: 0, include_unmerged: Boolean(unmerged_ok) });
     const removed = [];
     const skipped = [];
@@ -1386,6 +1402,7 @@ mcp.registerTool(
     _meta: { "anthropic/requiresUserInteraction": true },
   },
   tool(async ({ id, directory, action, resource }) => {
+    assertPromptingClient("revoke_permission");
     const dir = path.resolve(directory);
     const rule = ((await api("GET", "/api/permission/saved", { directory: dir }))?.data ?? []).find((p) => p.id === id);
     if (!rule) throw new Error(`No saved permission ${id} in ${dir}. Call list_saved_permissions.`);
@@ -1403,6 +1420,7 @@ mcp.registerTool(
     return {
       client: mcp.server.getClientVersion?.(),
       client_supports_dialogs: clientCanElicit(),
+      gated_tools_allowed: process.env.OPENCODE_NAVIGATOR_TRUST_CLIENT === "1" || TRUSTED_CLIENTS.has(mcp.server.getClientVersion?.()?.name),
       approvals: await approvalMode(),
       default_mode: s.defaultMode ?? "ask",
       notifications: s.notifications !== false && process.platform === "darwin",
