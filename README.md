@@ -43,7 +43,7 @@ The server speaks plain MCP over stdio, so any client that can launch an MCP ser
 ```json
 { "mcpServers": { "opencode": { "command": "node", "args": ["/absolute/path/to/server.mjs"] } } }
 ```
-Only Claude Code has been tested so far. Differences to expect elsewhere:
+Claude Code is the tested client. Muse Code (Meta's terminal agent, v1.4) also loads the server and lists all tools: add the entry above under `mcpServers` in `~/.config/muse/settings.json` and run `muse` in a trusted workspace (it reports its client name as `tbh`). Differences to expect elsewhere:
 - **No `opencode-worker` subagent.** That is a Claude Code feature, so the client's own model calls `run` and `check_all(wait_seconds)` itself. `AGENTS.md` has the same guidance for clients that read it.
 - **Approvals.** `approve`, `remove_worktrees` and `revoke_permission` are only safe if the client asks you before each tool call, so they refuse any client except Claude Code. If your client prompts for every tool call (auto-run off), set `OPENCODE_NAVIGATOR_TRUST_CLIENT=1` in the server's environment. Otherwise use `mode: "auto"` or `"readonly"`, which need no approvals, and watch `diff` before merging. `bridge_info` shows `gated_tools_allowed`.
 - **Dialogs and questions** use MCP elicitation where the client supports it (`client_supports_dialogs` in `bridge_info`); otherwise `check` returns them as `pending`.
